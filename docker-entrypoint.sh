@@ -7,9 +7,9 @@ set -e
 KNOWLEDGE_DIR="${CBM_KNOWLEDGE_DIR:-/data/knowledge}"
 
 if [ -n "$CBM_DOCS_REPO" ]; then
-    if [ -n "$CBM_DOCS_SSH_KEY" ]; then
+    if [ -n "$CBM_DOCS_SSH_KEY_B64" ]; then
         mkdir -p /root/.ssh
-        printf '%s\n' "$CBM_DOCS_SSH_KEY" > /root/.ssh/id_ed25519
+        printf '%s' "$CBM_DOCS_SSH_KEY_B64" | base64 -d > /root/.ssh/id_ed25519
         chmod 600 /root/.ssh/id_ed25519
         ssh-keyscan github.com >> /root/.ssh/known_hosts 2>/dev/null || true
         export GIT_SSH_COMMAND="ssh -i /root/.ssh/id_ed25519"
