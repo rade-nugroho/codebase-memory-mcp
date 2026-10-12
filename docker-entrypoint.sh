@@ -1,6 +1,7 @@
 #!/bin/sh
 # Container entrypoint: refresh + index the knowledge repo, serve Atlas UI
-# (loopback only) and expose MCP over SSE via supergateway.
+# behind an authenticated nginx front on :9749, and expose MCP over SSE via
+# supergateway on :8000.
 set -e
 
 KNOWLEDGE_DIR="${CBM_KNOWLEDGE_DIR:-/data/knowledge}"
@@ -21,7 +22,12 @@ if [ -n "$CBM_DOCS_REPO" ]; then
     codebase-memory-mcp cli index_repository "{\"repo_path\":\"$KNOWLEDGE_DIR\"}" || true
 fi
 
-# The Atlas UI is loopback-only by design; keep it running for local access.
-sleep infinity | codebase-memory-mcp --ui=true --port=9749 &
+# Atlas UI: cbm serves loopback on 9750; nginx fronts it on 9749 with basic
+# auth (password = CBM_UI_PASSWORD, falling back to SUPERGATEWAY_API_KEY).
+UI_PASS="${CBM_UI_PASSWORD:-${SUPERGATEWAY_API_KEY:-cbm}}"
+printf 'cbm:%s\n' "$(openssl passwd -apr1 "$UI_PASS")" > /etc/nginx/cbm-ui.htpasswd
+sleep infinity | codebase-memory-mcp --ui=true --port=9750 &
+nginx
+
 exec supergateway --stdio codebase-memory-mcp --port 8000 \
     --ssePath /sse --messagePath /message --cors --healthEndpoint /healthz
