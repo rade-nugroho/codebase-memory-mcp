@@ -38,6 +38,6 @@ COPY docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
 COPY docker-ui.nginx.conf /etc/nginx/conf.d/cbm-ui.conf
 RUN chmod +x /usr/local/bin/docker-entrypoint.sh \
  && rm -f /etc/nginx/sites-enabled/default
-ENV CBM_CACHE_DIR=/data
+ENV CBM_CACHE_DIR=/data/cache
 EXPOSE 8000 9749
 CMD ["docker-entrypoint.sh"]
