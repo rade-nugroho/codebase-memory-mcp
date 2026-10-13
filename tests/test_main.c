@@ -1824,6 +1824,7 @@ extern void suite_doc_mentions(void);
 extern void suite_doc_mentions_cost(void);
 extern void suite_doc_mentions_msbuild(void);
 extern void suite_doc_links_md(void);
+extern void suite_ontology_def(void);
 extern void suite_doc_links_pdf(void);
 extern void suite_doc_links_rst(void);
 extern void suite_doc_links_adoc(void);
@@ -2325,6 +2326,9 @@ int main(int argc, char **argv) {
 
     /* Markdown file reference link */
     RUN_SELECTED_SUITE(doclinks);
+
+    /* Ontology definition + emit */
+    RUN_SELECTED_SUITE(ontology_def);
 
     /* Doc-comment references -> MENTIONS */
     RUN_SELECTED_SUITE(doc_mentions);

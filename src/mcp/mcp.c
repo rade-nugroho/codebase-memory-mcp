@@ -66,6 +66,8 @@ enum {
 #include "discover/discover.h"
 #include "pipeline/pipeline.h"
 #include "callable_sig.h"       /* cbm_qn_callable_base_len */
+#include "ontology_def.h"
+#include "ontology_emit.h"
 #include "pipeline/doc_links.h" /* cbm_doclink_reason_name: the reasons the layer writes */
 #include "pipeline/pass_cross_repo.h"
 #include "git/git_context.h"
@@ -851,6 +853,55 @@ static const tool_def_t TOOLS[] = {
      "\"additionalProperties\":false,"
      "\"required\":[\"project\"]}"},
 
+    {"ontology_query",
+     "Query the project's Palantir-style ontology — object types, objects (instances), "
+     "interfaces, link types, action types, functions and shared properties materialized from "
+     ".cbm-ontology.json. kind=summary counts each; a kind plus name returns the full object "
+     "view (properties, resolved bindings with file/line, links, actions, instances, stale "
+     "bindings). kind=audit lists ontology_execute runs.",
+     "{\"type\":\"object\",\"properties\":{\"project\":{\"type\":\"string\"},"
+     "\"kind\":{\"type\":\"string\",\"enum\":[\"summary\",\"audit\",\"object-type\",\"object\","
+     "\"interface\",\"link-type\",\"action-type\",\"function\",\"shared-property\"],"
+     "\"default\":\"summary\",\"description\":\"Element kind to list, or the kind of the element "
+     "to detail when name is given.\"},"
+     "\"name\":{\"type\":\"string\",\"description\":\"Element name for the detail/object view\"},"
+     "\"limit\":{\"type\":\"integer\",\"default\":200,\"minimum\":1,\"maximum\":500},"
+     "\"offset\":{\"type\":\"integer\",\"default\":0,\"minimum\":0},"
+     "\"format\":{\"type\":\"string\",\"enum\":[\"tree\",\"json\"],\"default\":\"tree\"}},"
+     "\"additionalProperties\":false,"
+     "\"required\":[\"project\"]}"},
+
+    {"manage_ontology",
+     "Manage the project's ontology definition (.cbm-ontology.json). get reads it, validate "
+     "checks supplied content or the file on disk, update validates then atomically replaces the "
+     "file AND applies it to the live graph, apply re-materializes the file on disk, delete "
+     "removes the file and every ontology node. Writes take the project mutation lease; a "
+     "rejected validation writes nothing.",
+     "{\"type\":\"object\",\"properties\":{\"project\":{\"type\":\"string\"},"
+     "\"mode\":{\"type\":\"string\",\"enum\":[\"get\",\"validate\",\"update\",\"apply\","
+     "\"delete\"],\"default\":\"get\"},"
+     "\"content\":{\"type\":\"string\",\"description\":\"Whole definition JSON for update, or a "
+     "candidate document for validate\"},"
+     "\"format\":{\"type\":\"string\",\"enum\":[\"tree\",\"json\"],\"default\":\"tree\"}},"
+     "\"additionalProperties\":false,"
+     "\"required\":[\"project\"]}"},
+
+    {"ontology_execute",
+     "Execute an executable action type declared in the project's ontology. The repo's reviewed "
+     ".cbm-ontology.json is the authorization boundary: only actions it declares run, argv "
+     "templates get {{param}} substitution (never shell-parsed), declared params are "
+     "type/enum/pattern checked, actions marked confirm:true require confirm:true. Runs under a "
+     "timeout via the supervised subprocess API, captures output, and records an audit row "
+     "(ontology_query kind=audit).",
+     "{\"type\":\"object\",\"properties\":{\"project\":{\"type\":\"string\"},"
+     "\"action\":{\"type\":\"string\",\"description\":\"Action type name from the ontology\"},"
+     "\"params\":{\"type\":\"string\",\"description\":\"JSON object of parameter values\"},"
+     "\"confirm\":{\"type\":\"boolean\",\"default\":false,\"description\":\"Required when the "
+     "action is declared confirm:true\"},"
+     "\"format\":{\"type\":\"string\",\"enum\":[\"tree\",\"json\"],\"default\":\"tree\"}},"
+     "\"additionalProperties\":false,"
+     "\"required\":[\"project\",\"action\"]}"},
+
     {"ingest_traces",
      "Record observed runtime calls so the graph can distinguish observed from merely possible "
      "paths. Each trace is a call path (qualified names, adjacent = caller\xe2\x86\x92"
@@ -909,6 +960,9 @@ static const tool_annotation_def_t TOOL_ANNOTATIONS[] = {
     {"check_index_coverage", true, false, true, false},
     {"detect_changes", true, false, true, false},
     {"manage_adr", false, true, false, false},
+    {"ontology_query", true, false, true, false},
+    {"manage_ontology", false, true, false, false},
+    {"ontology_execute", false, true, false, false},
     {"ingest_traces", false, true, false, false},
 };
 
@@ -967,7 +1021,7 @@ static bool mcp_tool_allowed(cbm_mcp_tool_profile_t profile, const char *name) {
         "search_graph",     "query_graph",      "trace_path",     "get_code_snippet",
         "get_file_outline", "get_graph_schema", "compare_graphs", "get_architecture",
         "search_code",      "list_projects",    "index_status",   "check_index_coverage",
-        "detect_changes",
+        "detect_changes",   "ontology_query",
     };
     static const char *const scout_tools[] = {
         "search_graph",     "trace_path",    "get_code_snippet", "get_file_outline",
@@ -19610,9 +19664,9 @@ static char *handle_manage_adr(cbm_mcp_server_t *srv, const char *args) {
             yyjson_mut_obj_add_int(doc, root_obj, "total_lines", adr_line_count(adr_content));
             yyjson_mut_obj_add_bool(doc, root_obj, "content_complete", true);
         } else {
-            yyjson_mut_obj_add_str(doc, root_obj, "content", "");
-            yyjson_mut_obj_add_str(doc, root_obj, "status", "no_adr");
-            yyjson_mut_obj_add_str(doc, root_obj, "adr_hint", ADR_EMPTY_HINT);
+            yyjson_mut_obj_add_strcpy(doc, root_obj, "content", "");
+            yyjson_mut_obj_add_strcpy(doc, root_obj, "status", "no_adr");
+            yyjson_mut_obj_add_strcpy(doc, root_obj, "adr_hint", ADR_EMPTY_HINT);
         }
     }
 
@@ -19637,6 +19691,1103 @@ static char *handle_manage_adr(cbm_mcp_server_t *srv, const char *args) {
 
     char *result =
         legacy_json_result ? cbm_mcp_text_result(json, is_error) : mcp_result_from_json(args, json);
+    free(json);
+    return result;
+}
+
+/* ── ontology ─────────────────────────────────────────────────── */
+
+/* Ontology elements live in the graph as Ontology* labelled nodes whose
+ * file_path is CBM_ONTOLOGY_FILENAME — emitted by pass_ontology from the
+ * repo's .cbm-ontology.json, or applied live by manage_ontology. Reading
+ * them back is ordinary graph access; the helpers below just know the label
+ * and QN conventions. */
+
+typedef struct {
+    const char *kind; /* "object-type" | "object" | ... */
+    const char *label;
+    const char *list_name;
+} ont_kind_map_t;
+
+static const ont_kind_map_t ONT_KIND_MAP[] = {
+    {"object-type", "OntologyObjectType", "object_types"},
+    {"object", "OntologyObject", "objects"},
+    {"interface", "OntologyInterface", "interfaces"},
+    {"link-type", "OntologyLinkType", "link_types"},
+    {"action-type", "OntologyActionType", "action_types"},
+    {"function", "OntologyFunction", "functions"},
+    {"shared-property", "OntologySharedProperty", "shared_properties"},
+};
+
+static const ont_kind_map_t *ont_kind_lookup(const char *kind) {
+    if (!kind) {
+        return NULL;
+    }
+    for (size_t i = 0; i < sizeof(ONT_KIND_MAP) / sizeof(ONT_KIND_MAP[0]); i++) {
+        if (strcmp(ONT_KIND_MAP[i].kind, kind) == 0) {
+            return &ONT_KIND_MAP[i];
+        }
+    }
+    return NULL;
+}
+
+/* Emit one node as {name, label, qualified_name, ...properties merged}. */
+static void ont_node_to_json(yyjson_mut_doc *doc, yyjson_mut_val *arr, const cbm_node_t *n) {
+    yyjson_mut_val *o = yyjson_mut_obj(doc);
+    yyjson_mut_obj_add_strcpy(doc, o, "name", n->name ? n->name : "");
+    yyjson_mut_obj_add_strcpy(doc, o, "label", n->label ? n->label : "");
+    yyjson_mut_obj_add_strcpy(doc, o, "qualified_name",
+                           n->qualified_name ? n->qualified_name : "");
+    if (n->properties_json) {
+        yyjson_doc *pj = yyjson_read(n->properties_json, strlen(n->properties_json), 0);
+        if (pj) {
+            yyjson_val *proot = yyjson_doc_get_root(pj);
+            if (yyjson_is_obj(proot)) {
+                yyjson_obj_iter iter;
+                yyjson_obj_iter_init(proot, &iter);
+                yyjson_val *key;
+                while ((key = yyjson_obj_iter_next(&iter))) {
+                    yyjson_val *val = yyjson_obj_iter_get_val(key);
+                    yyjson_mut_val *kc = yyjson_val_mut_copy(doc, key);
+                    yyjson_mut_val *vc = yyjson_val_mut_copy(doc, val);
+                    if (kc && vc) {
+                        yyjson_mut_obj_add(o, kc, vc);
+                    }
+                }
+            }
+            yyjson_doc_free(pj);
+        }
+    }
+    yyjson_mut_arr_add_val(arr, o);
+}
+
+/* Names of nodes reachable from `id` over outgoing `type` edges. */
+static void ont_edge_targets(yyjson_mut_doc *doc, yyjson_mut_val *obj, const char *key,
+                             cbm_store_t *store, int64_t id, const char *type) {
+    cbm_edge_t *edges = NULL;
+    int count = 0;
+    yyjson_mut_val *arr = yyjson_mut_arr(doc);
+    if (cbm_store_find_edges_by_source_type(store, id, type, &edges, &count) == CBM_STORE_OK) {
+        for (int i = 0; i < count; i++) {
+            cbm_node_t t;
+            memset(&t, 0, sizeof(t));
+            if (cbm_store_find_node_by_id(store, edges[i].target_id, &t) == CBM_STORE_OK) {
+                yyjson_mut_val *e = yyjson_mut_obj(doc);
+                yyjson_mut_obj_add_strcpy(doc, e, "name", t.name ? t.name : "");
+                yyjson_mut_obj_add_strcpy(doc, e, "qualified_name",
+                                       t.qualified_name ? t.qualified_name : "");
+                yyjson_mut_obj_add_strcpy(doc, e, "label", t.label ? t.label : "");
+                if (t.file_path) {
+                    yyjson_mut_obj_add_strcpy(doc, e, "file_path", t.file_path);
+                    yyjson_mut_obj_add_int(doc, e, "start_line", t.start_line);
+                }
+                if (edges[i].properties_json &&
+                    strcmp(edges[i].properties_json, "{}") != 0) {
+                    yyjson_doc *ep = yyjson_read(edges[i].properties_json,
+                                                 strlen(edges[i].properties_json), 0);
+                    if (ep) {
+                        yyjson_mut_val *v =
+                            yyjson_val_mut_copy(doc, yyjson_doc_get_root(ep));
+                        if (v) {
+                            yyjson_mut_obj_add_val(doc, e, "edge", v);
+                        }
+                        yyjson_doc_free(ep);
+                    }
+                }
+                yyjson_mut_arr_add_val(arr, e);
+                cbm_node_free_fields(&t);
+            }
+        }
+        cbm_store_free_edges(edges, count);
+    }
+    yyjson_mut_obj_add_val(doc, obj, key, arr);
+}
+
+/* Nodes pointing AT `id` via `type` edges (e.g. instances of a type). */
+static void ont_edge_sources(yyjson_mut_doc *doc, yyjson_mut_val *obj, const char *key,
+                             cbm_store_t *store, int64_t id, const char *type) {
+    cbm_edge_t *edges = NULL;
+    int count = 0;
+    yyjson_mut_val *arr = yyjson_mut_arr(doc);
+    if (cbm_store_find_edges_by_target_type(store, id, type, &edges, &count) == CBM_STORE_OK) {
+        for (int i = 0; i < count; i++) {
+            cbm_node_t t;
+            memset(&t, 0, sizeof(t));
+            if (cbm_store_find_node_by_id(store, edges[i].source_id, &t) == CBM_STORE_OK) {
+                yyjson_mut_val *e = yyjson_mut_obj(doc);
+                yyjson_mut_obj_add_strcpy(doc, e, "name", t.name ? t.name : "");
+                yyjson_mut_obj_add_strcpy(doc, e, "qualified_name",
+                                       t.qualified_name ? t.qualified_name : "");
+                yyjson_mut_obj_add_strcpy(doc, e, "label", t.label ? t.label : "");
+                yyjson_mut_arr_add_val(arr, e);
+                cbm_node_free_fields(&t);
+            }
+        }
+        cbm_store_free_edges(edges, count);
+    }
+    yyjson_mut_obj_add_val(doc, obj, key, arr);
+}
+
+/* Full object view for one element node: identity + merged properties +
+ * resolved edge neighbourhoods. `bind_qns` in the props that produced no
+ * ONT_BINDS edge are reported stale so agents can see dead bindings. */
+static void ont_detail_json(yyjson_mut_doc *doc, cbm_store_t *store, const cbm_node_t *n,
+                            yyjson_mut_val *out) {
+    yyjson_mut_obj_add_strcpy(doc, out, "name", n->name ? n->name : "");
+    yyjson_mut_obj_add_strcpy(doc, out, "label", n->label ? n->label : "");
+    yyjson_mut_obj_add_strcpy(doc, out, "qualified_name",
+                           n->qualified_name ? n->qualified_name : "");
+    yyjson_mut_val *binds_arr = yyjson_mut_arr(doc);
+    if (n->properties_json) {
+        yyjson_doc *pj = yyjson_read(n->properties_json, strlen(n->properties_json), 0);
+        if (pj) {
+            yyjson_val *proot = yyjson_doc_get_root(pj);
+            if (yyjson_is_obj(proot)) {
+                yyjson_obj_iter iter;
+                yyjson_obj_iter_init(proot, &iter);
+                yyjson_val *key;
+                while ((key = yyjson_obj_iter_next(&iter))) {
+                    const char *kname = yyjson_get_str(key);
+                    if (kname && strcmp(kname, "binds") == 0) {
+                        continue; /* handled via edge resolution below */
+                    }
+                    yyjson_val *val = yyjson_obj_iter_get_val(key);
+                    yyjson_mut_val *kc = yyjson_val_mut_copy(doc, key);
+                    yyjson_mut_val *vc = yyjson_val_mut_copy(doc, val);
+                    if (kc && vc) {
+                        yyjson_mut_obj_add(out, kc, vc);
+                    }
+                }
+                /* resolve declared binds: live edge = resolved, missing edge
+                 * = stale (the code moved or the QN was always wrong) */
+                yyjson_val *bv = yyjson_obj_get(proot, "binds");
+                if (bv && yyjson_is_arr(bv)) {
+                    size_t i, m;
+                    yyjson_val *qn;
+                    yyjson_arr_foreach(bv, i, m, qn) {
+                        const char *q = yyjson_get_str(qn);
+                        if (!q) {
+                            continue;
+                        }
+                        yyjson_mut_val *b = yyjson_mut_obj(doc);
+                        yyjson_mut_obj_add_strcpy(doc, b, "qualified_name", q);
+                        cbm_node_t tn;
+                        memset(&tn, 0, sizeof(tn));
+                        if (cbm_store_find_node_by_qn(store, n->project, q, &tn) ==
+                            CBM_STORE_OK) {
+                            yyjson_mut_obj_add_bool(doc, b, "resolved", true);
+                            yyjson_mut_obj_add_strcpy(doc, b, "label",
+                                                   tn.label ? tn.label : "");
+                            yyjson_mut_obj_add_strcpy(doc, b, "file_path",
+                                                   tn.file_path ? tn.file_path : "");
+                            yyjson_mut_obj_add_int(doc, b, "start_line", tn.start_line);
+                            cbm_node_free_fields(&tn);
+                        } else {
+                            yyjson_mut_obj_add_bool(doc, b, "resolved", false);
+                            yyjson_mut_obj_add_bool(doc, b, "stale", true);
+                        }
+                        yyjson_mut_arr_add_val(binds_arr, b);
+                    }
+                }
+                /* single "bind" string (objects, functions) */
+                yyjson_val *sb = yyjson_obj_get(proot, "bind");
+                if (sb && yyjson_is_str(sb)) {
+                    yyjson_mut_obj_add_strcpy(doc, out, "bind", yyjson_get_str(sb));
+                    cbm_node_t tn;
+                    memset(&tn, 0, sizeof(tn));
+                    if (cbm_store_find_node_by_qn(store, n->project, yyjson_get_str(sb),
+                                                  &tn) == CBM_STORE_OK) {
+                        yyjson_mut_obj_add_bool(doc, out, "bind_resolved", true);
+                        yyjson_mut_obj_add_strcpy(doc, out, "bind_label",
+                                               tn.label ? tn.label : "");
+                        yyjson_mut_obj_add_strcpy(doc, out, "bind_file",
+                                               tn.file_path ? tn.file_path : "");
+                        yyjson_mut_obj_add_int(doc, out, "bind_line", tn.start_line);
+                        cbm_node_free_fields(&tn);
+                    } else {
+                        yyjson_mut_obj_add_bool(doc, out, "bind_resolved", false);
+                    }
+                }
+            }
+            yyjson_doc_free(pj);
+        }
+    }
+    yyjson_mut_obj_add_val(doc, out, "binds", binds_arr);
+    ont_edge_targets(doc, out, "bindings", store, n->id, "ONT_BINDS");
+    ont_edge_targets(doc, out, "implements", store, n->id, "ONT_IMPLEMENTS");
+    ont_edge_targets(doc, out, "links", store, n->id, "ONT_LINKS");
+    ont_edge_targets(doc, out, "actions", store, n->id, "ONT_HAS_ACTION");
+    ont_edge_targets(doc, out, "functions", store, n->id, "ONT_HAS_FUNCTION");
+    ont_edge_targets(doc, out, "shared_properties", store, n->id, "ONT_HAS_PROPERTY");
+    ont_edge_sources(doc, out, "instances", store, n->id, "ONT_INSTANCE_OF");
+    ont_edge_sources(doc, out, "linked_from", store, n->id, "ONT_LINKS");
+}
+
+static char *handle_ontology_query(cbm_mcp_server_t *srv, const char *args) {
+    char *project = get_project_arg(args);
+    char *kind = cbm_mcp_get_string_arg(args, "kind");
+    char *name = cbm_mcp_get_string_arg(args, "name");
+    int limit = cbm_mcp_get_int_arg(args, "limit", 200);
+    int offset = cbm_mcp_get_int_arg(args, "offset", 0);
+    if (!kind) {
+        kind = heap_strdup("summary");
+    }
+    if (limit < 1) {
+        limit = 1;
+    } else if (limit > 500) {
+        limit = 500;
+    }
+    if (offset < 0) {
+        offset = 0;
+    }
+
+    store_recovery_status_t recovery_status = STORE_RECOVERY_NONE;
+    cbm_store_t *store =
+        resolve_store_internal(srv, project, false, true, &recovery_status, true);
+    if (!store) {
+        char *err = build_no_store_error_checked(srv, project);
+        char *res = cbm_mcp_text_result(err, true);
+        free(err);
+        free(project);
+        free(kind);
+        free(name);
+        return res;
+    }
+
+    yyjson_mut_doc *doc = yyjson_mut_doc_new(NULL);
+    yyjson_mut_val *root = yyjson_mut_obj(doc);
+    yyjson_mut_doc_set_root(doc, root);
+    bool is_error = false;
+
+    if (strcmp(kind, "summary") == 0) {
+        for (size_t i = 0; i < sizeof(ONT_KIND_MAP) / sizeof(ONT_KIND_MAP[0]); i++) {
+            cbm_node_t *nodes = NULL;
+            int count = 0;
+            if (cbm_store_find_nodes_by_label(store, project, ONT_KIND_MAP[i].label, &nodes,
+                                              &count) == CBM_STORE_OK) {
+                yyjson_mut_obj_add_int(doc, root, ONT_KIND_MAP[i].list_name, count);
+                cbm_store_free_nodes(nodes, count);
+            }
+        }
+        cbm_node_t root_n;
+        memset(&root_n, 0, sizeof(root_n));
+        char *rqn = malloc(strlen(project) + 12);
+        if (rqn) {
+            sprintf(rqn, "%s.ontology", project);
+            if (cbm_store_find_node_by_qn(store, project, rqn, &root_n) == CBM_STORE_OK) {
+                yyjson_mut_obj_add_bool(doc, root, "present", true);
+                cbm_node_free_fields(&root_n);
+            } else {
+                yyjson_mut_obj_add_bool(doc, root, "present", false);
+            }
+            free(rqn);
+        }
+        yyjson_mut_obj_add_strcpy(doc, root, "definition_file", CBM_ONTOLOGY_FILENAME);
+    } else if (strcmp(kind, "audit") == 0) {
+        cbm_ontology_audit_row_t *rows = NULL;
+        int count = 0;
+        if (cbm_store_ontology_audit_list(store, project, limit, &rows, &count) ==
+            CBM_STORE_OK) {
+            yyjson_mut_val *arr = yyjson_mut_arr(doc);
+            for (int i = 0; i < count; i++) {
+                yyjson_mut_val *r = yyjson_mut_obj(doc);
+                yyjson_mut_obj_add_int(doc, r, "id", rows[i].id);
+                yyjson_mut_obj_add_strcpy(doc, r, "action", rows[i].action ? rows[i].action : "");
+                if (rows[i].actor) {
+                    yyjson_mut_obj_add_strcpy(doc, r, "actor", rows[i].actor);
+                }
+                yyjson_mut_obj_add_strcpy(doc, r, "status",
+                                       rows[i].status ? rows[i].status : "");
+                yyjson_mut_obj_add_int(doc, r, "exit_code", rows[i].exit_code);
+                yyjson_mut_obj_add_int(doc, r, "duration_ms", rows[i].duration_ms);
+                if (rows[i].detail) {
+                    yyjson_mut_obj_add_strcpy(doc, r, "detail", rows[i].detail);
+                }
+                if (rows[i].created_at) {
+                    yyjson_mut_obj_add_strcpy(doc, r, "created_at", rows[i].created_at);
+                }
+                yyjson_mut_arr_add_val(arr, r);
+            }
+            cbm_store_ontology_audit_free(rows, count);
+            yyjson_mut_obj_add_val(doc, root, "audit", arr);
+            yyjson_mut_obj_add_int(doc, root, "count", count);
+        } else {
+            /* keep the response shape stable for clients even when the audit
+             * table is absent (e.g. freshly (re)indexed store) */
+            yyjson_mut_obj_add_val(doc, root, "audit", yyjson_mut_arr(doc));
+            yyjson_mut_obj_add_int(doc, root, "count", 0);
+        }
+    } else {
+        const ont_kind_map_t *km = ont_kind_lookup(kind);
+        if (!km) {
+            yyjson_mut_obj_add_strcpy(doc, root, "error", "invalid kind");
+            yyjson_mut_obj_add_strcpy(doc, root, "hint",
+                                   "use summary|audit|object-type|object|interface|link-type|"
+                                   "action-type|function|shared-property");
+            is_error = true;
+        } else if (name) {
+            /* detail view of one element */
+            char *qn = cbm_ontology_qn(project, km->kind, name);
+            cbm_node_t n;
+            memset(&n, 0, sizeof(n));
+            if (qn && cbm_store_find_node_by_qn(store, project, qn, &n) == CBM_STORE_OK) {
+                ont_detail_json(doc, store, &n, root);
+                cbm_node_free_fields(&n);
+            } else {
+                yyjson_mut_obj_add_strcpy(doc, root, "error", "element not found");
+                is_error = true;
+            }
+            free(qn);
+        } else {
+            /* list view of one kind */
+            cbm_node_t *nodes = NULL;
+            int count = 0;
+            yyjson_mut_val *arr = yyjson_mut_arr(doc);
+            int total = 0;
+            if (cbm_store_find_nodes_by_label(store, project, km->label, &nodes, &count) ==
+                CBM_STORE_OK) {
+                total = count;
+                for (int i = offset; i < count && i < offset + limit; i++) {
+                    ont_node_to_json(doc, arr, &nodes[i]);
+                }
+                cbm_store_free_nodes(nodes, count);
+            }
+            yyjson_mut_obj_add_val(doc, root, km->list_name, arr);
+            yyjson_mut_obj_add_int(doc, root, "total", total);
+            yyjson_mut_obj_add_int(doc, root, "offset", offset);
+            yyjson_mut_obj_add_int(doc, root, "limit", limit);
+        }
+    }
+
+    char *json = yy_doc_to_str(doc);
+    yyjson_mut_doc_free(doc);
+    free(project);
+    free(kind);
+    free(name);
+    if (is_error) {
+        char *res = cbm_mcp_text_result(json, true);
+        free(json);
+        return res;
+    }
+    char *result = mcp_result_from_json(args, json);
+    free(json);
+    return result;
+}
+
+/* Write `content` to <root>/<file> atomically (temp + rename). */
+static int ont_write_file_atomic(const char *root, const char *file, const char *content) {
+    char path[CBM_SZ_4K];
+    char tmp[CBM_SZ_4K + 8];
+    int n = snprintf(path, sizeof(path), "%s/%s", root, file);
+    if (n <= 0 || (size_t)n >= sizeof(path)) {
+        return -1;
+    }
+    snprintf(tmp, sizeof(tmp), "%s.tmp", path);
+    FILE *fp = cbm_fopen(tmp, "wb");
+    if (!fp) {
+        return -1;
+    }
+    size_t len = strlen(content);
+    bool ok = (fwrite(content, 1, len, fp) == len && fclose(fp) == 0);
+    if (!ok) {
+        (void)fclose(fp);
+        cbm_unlink(tmp);
+        return -1;
+    }
+    if (cbm_rename_replace(tmp, path) != 0) {
+        cbm_unlink(tmp);
+        return -1;
+    }
+    return 0;
+}
+
+static void ont_errors_to_json(yyjson_mut_doc *doc, yyjson_mut_val *root,
+                               const cbm_ontology_errors_t *errors) {
+    yyjson_mut_val *arr = yyjson_mut_arr(doc);
+    if (errors) {
+        for (int i = 0; i < errors->count; i++) {
+            yyjson_mut_arr_add_strcpy(doc, arr, errors->items[i]);
+        }
+    }
+    yyjson_mut_obj_add_val(doc, root, "diagnostics", arr);
+}
+
+static void ont_unresolved_to_json(yyjson_mut_doc *doc, yyjson_mut_val *root,
+                                   const cbm_ontology_unresolved_t *u) {
+    yyjson_mut_val *arr = yyjson_mut_arr(doc);
+    if (u) {
+        for (int i = 0; i < u->count; i++) {
+            yyjson_mut_val *r = yyjson_mut_obj(doc);
+            yyjson_mut_obj_add_strcpy(doc, r, "from", u->items[i].from_qn);
+            yyjson_mut_obj_add_strcpy(doc, r, "to", u->items[i].to_qn);
+            yyjson_mut_arr_add_val(arr, r);
+        }
+    }
+    yyjson_mut_obj_add_val(doc, root, "unresolved_bindings", arr);
+}
+
+static char *handle_manage_ontology(cbm_mcp_server_t *srv, const char *args) {
+    char *project = get_project_arg(args);
+    char *mode_str = cbm_mcp_get_string_arg(args, "mode");
+    char *content = cbm_mcp_get_string_arg(args, "content");
+    if (!mode_str) {
+        mode_str = heap_strdup("get");
+    }
+    bool valid_mode = strcmp(mode_str, "get") == 0 || strcmp(mode_str, "validate") == 0 ||
+                      strcmp(mode_str, "update") == 0 || strcmp(mode_str, "apply") == 0 ||
+                      strcmp(mode_str, "delete") == 0;
+    if (!valid_mode) {
+        free(project);
+        free(mode_str);
+        free(content);
+        return cbm_mcp_text_result(
+            "invalid mode: use get, validate, update, apply, or delete", true);
+    }
+    bool write_request =
+        strcmp(mode_str, "update") == 0 || strcmp(mode_str, "delete") == 0 ||
+        strcmp(mode_str, "apply") == 0;
+    if (strcmp(mode_str, "update") == 0 && !content) {
+        free(project);
+        free(mode_str);
+        return cbm_mcp_text_result("content is required for update", true);
+    }
+
+    bool mutation_held = false;
+    if (write_request && project) {
+        mutation_held = mcp_project_mutation_begin(srv, project);
+        if (!mutation_held) {
+            free(project);
+            free(mode_str);
+            free(content);
+            return cbm_mcp_text_result(
+                "project operation cancelled or blocked by an active index", true);
+        }
+        if (mcp_request_cancelled(srv)) {
+            mcp_project_mutation_end(srv, project);
+            free(project);
+            free(mode_str);
+            free(content);
+            return cbm_mcp_text_result("project operation cancelled for this request", true);
+        }
+    }
+
+    store_recovery_status_t recovery_status = STORE_RECOVERY_NONE;
+    cbm_store_t *resolved = resolve_store_internal(srv, project, mutation_held,
+                                                   !write_request, &recovery_status, true);
+    if (!resolved) {
+        if (mutation_held) {
+            mcp_project_mutation_end(srv, project);
+        }
+        char *err = build_no_store_error_checked(srv, project);
+        char *res = cbm_mcp_text_result(err, true);
+        free(err);
+        free(project);
+        free(mode_str);
+        free(content);
+        return res;
+    }
+
+    cbm_store_t *store = resolved;
+    cbm_store_t *owned_rw = NULL;
+    if (write_request) {
+        store = open_store_for_write(srv, resolved, &owned_rw);
+        if (!store) {
+            if (mutation_held) {
+                mcp_project_mutation_end(srv, project);
+            }
+            free(project);
+            free(mode_str);
+            free(content);
+            return cbm_mcp_text_result("failed to open writable store", true);
+        }
+    }
+
+    char *root_path = project_root_from_store(store, project);
+    yyjson_mut_doc *doc = yyjson_mut_doc_new(NULL);
+    yyjson_mut_val *root = yyjson_mut_obj(doc);
+    yyjson_mut_doc_set_root(doc, root);
+    bool is_error = false;
+
+    if (!root_path) {
+        yyjson_mut_obj_add_strcpy(doc, root, "error", "project root unknown");
+        is_error = true;
+    } else if (strcmp(mode_str, "get") == 0) {
+        char path[CBM_SZ_4K];
+        snprintf(path, sizeof(path), "%s/%s", root_path, CBM_ONTOLOGY_FILENAME);
+        FILE *fp = cbm_fopen(path, "rb");
+        if (fp) {
+            (void)fseek(fp, 0, SEEK_END);
+            long sz = ftell(fp);
+            (void)fseek(fp, 0, SEEK_SET);
+            char *buf = malloc((size_t)sz + 1);
+            if (buf && sz > 0 && fread(buf, 1, (size_t)sz, fp) == (size_t)sz) {
+                buf[sz] = '\0';
+                yyjson_mut_obj_add_strcpy(doc, root, "content", buf);
+                yyjson_mut_obj_add_bool(doc, root, "exists", true);
+            } else {
+                yyjson_mut_obj_add_strcpy(doc, root, "content", "");
+                yyjson_mut_obj_add_bool(doc, root, "exists", true);
+            }
+            free(buf);
+            (void)fclose(fp);
+        } else {
+            yyjson_mut_obj_add_bool(doc, root, "exists", false);
+            yyjson_mut_obj_add_strcpy(doc, root, "hint",
+                                   "create one with manage_ontology(mode='update', "
+                                   "content='{...}')");
+        }
+    } else if (strcmp(mode_str, "validate") == 0) {
+        /* validate `content` when supplied, else the file on disk */
+        cbm_ontology_errors_t errors = {0};
+        cbm_ontology_def_t *def = NULL;
+        if (content) {
+            def = cbm_ontology_def_parse(content, (int)strlen(content), project, &errors);
+        } else {
+            def = cbm_ontology_load_file(root_path, project, &errors);
+        }
+        yyjson_mut_obj_add_bool(doc, root, "valid", def && errors.count == 0);
+        if (!def && errors.count == 0) {
+            yyjson_mut_obj_add_strcpy(doc, root, "error",
+                                   content ? "not a JSON object" : "no ontology file");
+        }
+        ont_errors_to_json(doc, root, &errors);
+        cbm_ontology_def_free(def);
+        cbm_ontology_errors_free(&errors);
+    } else if (strcmp(mode_str, "delete") == 0) {
+        char path[CBM_SZ_4K];
+        snprintf(path, sizeof(path), "%s/%s", root_path, CBM_ONTOLOGY_FILENAME);
+        if (cbm_store_delete_nodes_by_file(store, project, CBM_ONTOLOGY_FILENAME) ==
+                CBM_STORE_OK &&
+            cbm_unlink(path) == 0) {
+            yyjson_mut_obj_add_strcpy(doc, root, "status", "deleted");
+        } else {
+            yyjson_mut_obj_add_strcpy(doc, root, "error", "delete failed");
+            is_error = true;
+        }
+    } else {
+        /* update / apply */
+        if (strcmp(mode_str, "update") == 0) {
+            cbm_ontology_errors_t errors = {0};
+            cbm_ontology_def_t *def =
+                cbm_ontology_def_parse(content, (int)strlen(content), project, &errors);
+            if (!def || errors.count > 0) {
+                yyjson_mut_obj_add_strcpy(doc, root, "status", "rejected");
+                yyjson_mut_obj_add_strcpy(
+                    doc, root, "error",
+                    def ? "diagnostics present; nothing written" : "not a JSON object");
+                ont_errors_to_json(doc, root, &errors);
+                is_error = true;
+                cbm_ontology_def_free(def);
+                cbm_ontology_errors_free(&errors);
+                goto ont_manage_done;
+            }
+            cbm_ontology_def_free(def);
+            cbm_ontology_errors_free(&errors);
+            if (ont_write_file_atomic(root_path, CBM_ONTOLOGY_FILENAME, content) != 0) {
+                yyjson_mut_obj_add_strcpy(doc, root, "error", "write failed");
+                is_error = true;
+                goto ont_manage_done;
+            }
+        }
+        cbm_ontology_errors_t errors = {0};
+        cbm_ontology_unresolved_t unresolved = {0};
+        int arc =
+            cbm_ontology_apply_store(store, root_path, project, &errors, &unresolved);
+        if (arc == CBM_ONTOLOGY_APPLY_OK) {
+            yyjson_mut_obj_add_strcpy(doc, root, "status", "applied");
+            ont_unresolved_to_json(doc, root, &unresolved);
+        } else if (arc == CBM_ONTOLOGY_APPLY_INVALID) {
+            yyjson_mut_obj_add_strcpy(doc, root, "status", "rejected");
+            ont_errors_to_json(doc, root, &errors);
+            is_error = true;
+        } else if (arc == CBM_ONTOLOGY_APPLY_NO_FILE) {
+            yyjson_mut_obj_add_strcpy(doc, root, "status", "no_file");
+            yyjson_mut_obj_add_strcpy(doc, root, "error", "no ontology file to apply");
+            is_error = true;
+        } else {
+            yyjson_mut_obj_add_strcpy(doc, root, "status", "store_error");
+            yyjson_mut_obj_add_strcpy(doc, root, "error", "apply failed");
+            is_error = true;
+        }
+        cbm_ontology_errors_free(&errors);
+        cbm_ontology_unresolved_free(&unresolved);
+    }
+
+ont_manage_done:
+    free(root_path);
+    char *json = yy_doc_to_str(doc);
+    yyjson_mut_doc_free(doc);
+    if (owned_rw) {
+        cbm_store_close(owned_rw);
+    }
+    if (mutation_held) {
+        mcp_project_mutation_end(srv, project);
+    }
+    free(project);
+    free(mode_str);
+    free(content);
+    if (is_error) {
+        char *res = cbm_mcp_text_result(json, true);
+        free(json);
+        return res;
+    }
+    char *result = mcp_result_from_json(args, json);
+    free(json);
+    return result;
+}
+
+/* ── ontology_execute ─────────────────────────────────────────── */
+
+/* Substitute {{name}} placeholders in argv entries with typed param values.
+ * Values are inserted as single argv elements — never re-parsed by a shell —
+ * so spaces/quotes in a value can never split or escape into another arg. */
+static char *ont_subst_argv(const char *tpl, yyjson_val *params) {
+    if (!tpl) {
+        return NULL;
+    }
+    size_t cap = strlen(tpl) + 256;
+    char *out = malloc(cap);
+    if (!out) {
+        return NULL;
+    }
+    size_t o = 0;
+    const char *p = tpl;
+    while (*p && o < cap - 1) {
+        const char *open = strstr(p, "{{");
+        if (!open) {
+            size_t rest = strlen(p);
+            if (o + rest >= cap) {
+                free(out);
+                return NULL;
+            }
+            memcpy(out + o, p, rest);
+            o += rest;
+            break;
+        }
+        const char *close = strstr(open + 2, "}}");
+        if (!close) {
+            free(out);
+            return NULL;
+        }
+        size_t lit = (size_t)(open - p);
+        if (o + lit >= cap) {
+            free(out);
+            return NULL;
+        }
+        memcpy(out + o, p, lit);
+        o += lit;
+        char key[CBM_SZ_128];
+        size_t klen = (size_t)(close - open - 2);
+        if (klen >= sizeof(key)) {
+            free(out);
+            return NULL;
+        }
+        memcpy(key, open + 2, klen);
+        key[klen] = '\0';
+        yyjson_val *v = params ? yyjson_obj_get(params, key) : NULL;
+        const char *val = NULL;
+        char numbuf[CBM_SZ_64];
+        if (v && yyjson_is_str(v)) {
+            val = yyjson_get_str(v);
+        } else if (v && (yyjson_is_num(v) || yyjson_is_bool(v))) {
+            if (yyjson_is_bool(v)) {
+                val = yyjson_get_bool(v) ? "true" : "false";
+            } else if (yyjson_is_int(v)) {
+                snprintf(numbuf, sizeof(numbuf), "%lld", (long long)yyjson_get_sint(v));
+                val = numbuf;
+            } else {
+                snprintf(numbuf, sizeof(numbuf), "%g", yyjson_get_real(v));
+                val = numbuf;
+            }
+        }
+        if (!val) {
+            free(out);
+            return NULL; /* unknown placeholder -> reject, never guess */
+        }
+        size_t vlen = strlen(val);
+        if (o + vlen >= cap) {
+            size_t ncap = cap * 2 + vlen;
+            char *bigger = realloc(out, ncap);
+            if (!bigger) {
+                free(out);
+                return NULL;
+            }
+            out = bigger;
+            cap = ncap;
+        }
+        memcpy(out + o, val, vlen);
+        o += vlen;
+        p = close + 2;
+    }
+    out[o] = '\0';
+    return out;
+}
+
+/* Validate one caller-supplied param value against its declaration. Returns a
+ * static reason string on failure. */
+static const char *ont_param_check(const cbm_onto_param_t *decl, yyjson_val *v) {
+    if (!v) {
+        return decl->required ? "required parameter missing" : NULL;
+    }
+    const char *t = decl->type ? decl->type : "string";
+    if (strcmp(t, "string") == 0 || strcmp(t, "enum") == 0) {
+        if (!yyjson_is_str(v)) {
+            return "expected string";
+        }
+        if (decl->enum_count > 0) {
+            const char *sv = yyjson_get_str(v);
+            bool ok = false;
+            for (int i = 0; i < decl->enum_count; i++) {
+                if (sv && strcmp(sv, decl->enum_values[i]) == 0) {
+                    ok = true;
+                    break;
+                }
+            }
+            if (!ok) {
+                return "value not in enum";
+            }
+        }
+        const char *sv_str = yyjson_get_str(v);
+        if (decl->pattern && sv_str && strlen(sv_str) < CBM_SZ_4K) {
+            cbm_regex_t re;
+            if (cbm_regcomp(&re, decl->pattern, CBM_REG_EXTENDED) == 0) {
+                bool match = (cbm_regexec(&re, yyjson_get_str(v), 0, NULL, 0) == 0);
+                cbm_regfree(&re);
+                if (!match) {
+                    return "pattern mismatch";
+                }
+            }
+        }
+    } else if (strcmp(t, "number") == 0) {
+        if (!yyjson_is_num(v)) {
+            return "expected number";
+        }
+    } else if (strcmp(t, "boolean") == 0) {
+        if (!yyjson_is_bool(v)) {
+            return "expected boolean";
+        }
+    }
+    return NULL;
+}
+
+static char *handle_ontology_execute(cbm_mcp_server_t *srv, const char *args) {
+    char *project = get_project_arg(args);
+    char *action_name = cbm_mcp_get_string_arg(args, "action");
+    bool confirm = cbm_mcp_get_bool_arg(args, "confirm");
+    char *params_json = cbm_mcp_get_string_arg(args, "params");
+
+    if (!action_name) {
+        free(project);
+        free(params_json);
+        return cbm_mcp_text_result("action is required", true);
+    }
+
+    yyjson_doc *pdoc = params_json ? yyjson_read(params_json, strlen(params_json), 0) : NULL;
+    yyjson_val *params = (pdoc && yyjson_is_obj(yyjson_doc_get_root(pdoc)))
+                             ? yyjson_doc_get_root(pdoc)
+                             : NULL;
+    if (params_json && !params) {
+        free(project);
+        free(action_name);
+        free(params_json);
+        yyjson_doc_free(pdoc);
+        return cbm_mcp_text_result("params must be a JSON object", true);
+    }
+
+    /* Execution is a write-side operation: it records an audit row and may
+     * have side effects, so it takes the same per-project mutation lease as
+     * ADR writes — serialized against indexing, refused while one runs. */
+    bool mutation_held = false;
+    if (project) {
+        mutation_held = mcp_project_mutation_begin(srv, project);
+        if (!mutation_held) {
+            free(project);
+            free(action_name);
+            free(params_json);
+            yyjson_doc_free(pdoc);
+            return cbm_mcp_text_result(
+                "project operation cancelled or blocked by an active index", true);
+        }
+        if (mcp_request_cancelled(srv)) {
+            mcp_project_mutation_end(srv, project);
+            free(project);
+            free(action_name);
+            free(params_json);
+            yyjson_doc_free(pdoc);
+            return cbm_mcp_text_result("project operation cancelled for this request", true);
+        }
+    }
+
+    store_recovery_status_t recovery_status = STORE_RECOVERY_NONE;
+    cbm_store_t *resolved =
+        resolve_store_internal(srv, project, mutation_held, false, &recovery_status, true);
+    if (!resolved) {
+        if (mutation_held) {
+            mcp_project_mutation_end(srv, project);
+        }
+        char *err = build_no_store_error_checked(srv, project);
+        char *res = cbm_mcp_text_result(err, true);
+        free(err);
+        free(project);
+        free(action_name);
+        free(params_json);
+        yyjson_doc_free(pdoc);
+        return res;
+    }
+    cbm_store_t *store = resolved;
+    cbm_store_t *owned_rw = NULL;
+    char *root_path = project_root_from_store(store, project);
+    if (!root_path) {
+        free(project);
+        free(action_name);
+        free(params_json);
+        yyjson_doc_free(pdoc);
+        return cbm_mcp_text_result("project root unknown", true);
+    }
+
+    /* The definition file is the authorization boundary: an action exists
+     * and may run only when the repo's reviewed definition says so. */
+    cbm_ontology_errors_t errors = {0};
+    cbm_ontology_def_t *def = cbm_ontology_load_file(root_path, project, &errors);
+    const cbm_onto_action_t *act =
+        def ? cbm_ontology_find_action(def, action_name) : NULL;
+
+    yyjson_mut_doc *doc = yyjson_mut_doc_new(NULL);
+    yyjson_mut_val *root = yyjson_mut_obj(doc);
+    yyjson_mut_doc_set_root(doc, root);
+    int audit_exit = -1;
+    int audit_ms = 0;
+    const char *audit_status = "error";
+    char detail[CBM_SZ_1K] = "";
+
+    if (!def || !act) {
+        yyjson_mut_obj_add_strcpy(doc, root, "error", "action not found");
+        snprintf(detail, sizeof(detail), "no ontology file or unknown action '%s'",
+                 action_name);
+        goto ont_exec_audit;
+    }
+    if (act->confirm && !confirm) {
+        yyjson_mut_obj_add_strcpy(doc, root, "error", "confirmation required");
+        yyjson_mut_obj_add_strcpy(doc, root, "hint",
+                               "this action is marked confirm:true; pass confirm:true to run");
+        audit_status = "denied";
+        snprintf(detail, sizeof(detail), "confirm required");
+        goto ont_exec_audit;
+    }
+    if (!act->has_exec) {
+        yyjson_mut_obj_add_strcpy(doc, root, "error",
+                               "action is not executable (no exec block)");
+        audit_status = "denied";
+        snprintf(detail, sizeof(detail), "no exec block");
+        goto ont_exec_audit;
+    }
+    {
+        /* validate declared params */
+        const char *bad = NULL;
+        const char *bad_param = NULL;
+        for (int i = 0; i < act->param_count && !bad; i++) {
+            yyjson_val *v = params ? yyjson_obj_get(params, act->params[i].name) : NULL;
+            bad = ont_param_check(&act->params[i], v);
+            bad_param = act->params[i].name;
+        }
+        if (bad) {
+            yyjson_mut_obj_add_strcpy(doc, root, "error", bad);
+            yyjson_mut_obj_add_strcpy(doc, root, "param", bad_param);
+            audit_status = "denied";
+            snprintf(detail, sizeof(detail), "param %s: %s", bad_param, bad);
+            goto ont_exec_audit;
+        }
+        /* build argv: each template element gets {{name}} substitution */
+        char **argv = calloc((size_t)act->exec.argc + 1, sizeof(char *));
+        if (!argv) {
+            yyjson_mut_obj_add_strcpy(doc, root, "error", "oom");
+            goto ont_exec_audit;
+        }
+        bool subst_failed = false;
+        for (int i = 0; i < act->exec.argc; i++) {
+            argv[i] = ont_subst_argv(act->exec.argv[i], params);
+            if (!argv[i]) {
+                subst_failed = true;
+            }
+        }
+        if (subst_failed) {
+            for (int i = 0; i < act->exec.argc; i++) {
+                free(argv[i]);
+            }
+            free(argv);
+            yyjson_mut_obj_add_strcpy(doc, root, "error",
+                                   "unresolved {{param}} placeholder in argv");
+            audit_status = "denied";
+            snprintf(detail, sizeof(detail), "argv substitution failed");
+            goto ont_exec_audit;
+        }
+        /* cwd is confined to the repo root */
+        const char *cwd_rel = act->exec.cwd ? act->exec.cwd : ".";
+        if (strstr(cwd_rel, "..")) {
+            for (int i = 0; i < act->exec.argc; i++) {
+                free(argv[i]);
+            }
+            free(argv);
+            yyjson_mut_obj_add_strcpy(doc, root, "error", "exec.cwd escapes project root");
+            audit_status = "denied";
+            snprintf(detail, sizeof(detail), "cwd escape rejected");
+            goto ont_exec_audit;
+        }
+        char cwd[CBM_SZ_4K];
+        snprintf(cwd, sizeof(cwd), "%s/%s", root_path, cwd_rel);
+
+        /* capture stdout+stderr to a private temp file */
+        char logtmpl[CBM_SZ_4K];
+        snprintf(logtmpl, sizeof(logtmpl), "%s/cbm-ont-exec-XXXXXX", cbm_tmpdir());
+        int logfd = cbm_mkstemp(logtmpl);
+        if (logfd >= 0) {
+            close(logfd);
+        }
+        const char *log_file = logfd >= 0 ? logtmpl : NULL;
+
+        int timeout = act->exec.timeout_ms > 0 ? act->exec.timeout_ms : 30000;
+        struct timespec t0;
+        cbm_clock_gettime(CLOCK_MONOTONIC, &t0);
+        cbm_proc_opts_t opts = {0};
+        opts.bin = argv[0];
+        opts.argv = (const char *const *)argv;
+        opts.env_overrides = (const char *const *)act->exec.env;
+        opts.log_file = log_file;
+        opts.quiet_timeout_ms = timeout;
+        opts.cancel_grace_ms = CBM_SUBPROCESS_DEFAULT_CANCEL_GRACE_MS;
+        opts.delete_log_on_exit = false;
+        cbm_proc_result_t res;
+        memset(&res, 0, sizeof(res));
+        /* cbm_subprocess_run spawns in the CALLER's cwd — the MCP server has
+         * no per-project cwd, so chdir is not an option on a shared daemon.
+         * Pass the confined cwd through the env instead and let the action's
+         * argv carry absolute/relative paths; the def file controls the real
+         * working directory contract via {{param}}-free argv[0] anyway. To
+         * keep the contract honest we expose CBM_PROJECT_ROOT/CBM_ACTION_CWD
+         * so scripts can cd themselves. */
+        const char *env_extra[4];
+        char env_root[CBM_SZ_4K];
+        char env_cwd[CBM_SZ_4K];
+        snprintf(env_root, sizeof(env_root), "CBM_PROJECT_ROOT=%s", root_path);
+        snprintf(env_cwd, sizeof(env_cwd), "CBM_ACTION_CWD=%s", cwd);
+        int ei = 0;
+        env_extra[ei++] = env_root;
+        env_extra[ei++] = env_cwd;
+        env_extra[ei] = NULL;
+        /* merge: def env entries first, then the two CBM_* exports */
+        const char **merged_env = NULL;
+        if (act->exec.env_count > 0) {
+            merged_env = calloc((size_t)act->exec.env_count + ei + 1, sizeof(char *));
+            if (merged_env) {
+                int m = 0;
+                for (int i = 0; i < act->exec.env_count; i++) {
+                    merged_env[m++] = act->exec.env[i];
+                }
+                for (int i = 0; i < ei; i++) {
+                    merged_env[m++] = env_extra[i];
+                }
+                merged_env[m] = NULL;
+            }
+        } else {
+            merged_env = calloc(ei + 1, sizeof(char *));
+            if (merged_env) {
+                for (int i = 0; i < ei; i++) {
+                    merged_env[i] = env_extra[i];
+                }
+                merged_env[ei] = NULL;
+            }
+        }
+        opts.env_overrides = (const char *const *)merged_env;
+        int run_rc = cbm_subprocess_run(&opts, &res);
+        free((void *)merged_env);
+        struct timespec t1;
+        cbm_clock_gettime(CLOCK_MONOTONIC, &t1);
+        audit_ms = (int)((t1.tv_sec - t0.tv_sec) * 1000 +
+                         (t1.tv_nsec - t0.tv_nsec) / 1000000);
+        audit_exit = res.exit_code;
+
+        /* read back captured output (tail) */
+        if (log_file) {
+            FILE *lf = cbm_fopen(log_file, "rb");
+            if (lf) {
+                (void)fseek(lf, 0, SEEK_END);
+                long lsz = ftell(lf);
+                long tail = lsz > 16384 ? 16384 : lsz;
+                (void)fseek(lf, lsz - tail, SEEK_SET);
+                char *lbuf = malloc((size_t)tail + 1);
+                if (lbuf && tail > 0 && fread(lbuf, 1, (size_t)tail, lf) == (size_t)tail) {
+                    lbuf[tail] = '\0';
+                    yyjson_mut_obj_add_strcpy(doc, root, "output", lbuf);
+                    size_t dlen = strlen(lbuf);
+                    size_t cplen = dlen < sizeof(detail) - 1 ? dlen : sizeof(detail) - 1;
+                    memcpy(detail, lbuf + dlen - cplen, cplen);
+                    detail[cplen] = '\0';
+                }
+                free(lbuf);
+                (void)fclose(lf);
+            }
+            cbm_unlink(log_file);
+        }
+
+        yyjson_mut_obj_add_int(doc, root, "exit_code", res.exit_code);
+        yyjson_mut_obj_add_int(doc, root, "duration_ms", audit_ms);
+        if (run_rc != 0) {
+            yyjson_mut_obj_add_strcpy(doc, root, "error", "spawn failed");
+            if (!detail[0]) {
+                snprintf(detail, sizeof(detail), "spawn failed");
+            }
+        } else if (res.outcome == CBM_PROC_CLEAN) {
+            yyjson_mut_obj_add_strcpy(doc, root, "status", "ok");
+            audit_status = "ok";
+        } else if (res.outcome == CBM_PROC_HANG) {
+            yyjson_mut_obj_add_strcpy(doc, root, "status", "timeout");
+            audit_status = "timeout";
+            if (!detail[0]) {
+                snprintf(detail, sizeof(detail), "quiet timeout %d ms", timeout);
+            }
+        } else if (res.outcome == CBM_PROC_CRASH) {
+            yyjson_mut_obj_add_strcpy(doc, root, "status", "crash");
+            if (!detail[0]) {
+                snprintf(detail, sizeof(detail), "signal %d", res.term_signal);
+            }
+        } else {
+            yyjson_mut_obj_add_strcpy(doc, root, "status", "failed");
+            audit_status = res.cancellation_requested ? "cancelled" : "error";
+        }
+        for (int i = 0; i < act->exec.argc; i++) {
+            free(argv[i]);
+        }
+        free(argv);
+    }
+
+ont_exec_audit:
+    /* The audit row is a write — go through a writable handle like
+     * manage_adr, never the read-only resolve. */
+    {
+        cbm_store_t *wstore = open_store_for_write(srv, resolved, &owned_rw);
+        if (wstore) {
+            (void)cbm_store_ontology_audit_write(wstore, project, action_name, "mcp",
+                                                 params_json ? params_json : "{}",
+                                                 audit_status, audit_exit, audit_ms,
+                                                 detail[0] ? detail : NULL);
+        }
+        if (owned_rw) {
+            cbm_store_close(owned_rw);
+        }
+    }
+    if (mutation_held) {
+        mcp_project_mutation_end(srv, project);
+    }
+    cbm_ontology_def_free(def);
+    cbm_ontology_errors_free(&errors);
+    free(root_path);
+    char *json = yy_doc_to_str(doc);
+    yyjson_mut_doc_free(doc);
+    free(project);
+    free(action_name);
+    free(params_json);
+    yyjson_doc_free(pdoc);
+    char *result = mcp_result_from_json(args, json);
     free(json);
     return result;
 }
@@ -19921,6 +21072,15 @@ static char *dispatch_tool(cbm_mcp_server_t *srv, const char *tool_name, const c
     }
     if (strcmp(tool_name, "manage_adr") == 0) {
         return handle_manage_adr(srv, args_json);
+    }
+    if (strcmp(tool_name, "ontology_query") == 0) {
+        return handle_ontology_query(srv, args_json);
+    }
+    if (strcmp(tool_name, "manage_ontology") == 0) {
+        return handle_manage_ontology(srv, args_json);
+    }
+    if (strcmp(tool_name, "ontology_execute") == 0) {
+        return handle_ontology_execute(srv, args_json);
     }
     if (strcmp(tool_name, "ingest_traces") == 0) {
         return handle_ingest_traces(srv, args_json);

@@ -14,7 +14,7 @@
 
 #include "foundation/constants.h"
 
-enum { CBM_DIR_PERMS = 0755, PL_RING = 4, PL_RING_MASK = 3, PL_SEQ_PASSES = 7 };
+enum { CBM_DIR_PERMS = 0755, PL_RING = 4, PL_RING_MASK = 3, PL_SEQ_PASSES = 8 };
 #define PL_NSEC_PER_SEC 1000000000LL
 #include "pipeline/pipeline.h"
 #include "pipeline/artifact.h"
@@ -2306,6 +2306,8 @@ static int run_sequential_pipeline(cbm_pipeline_t *p, cbm_pipeline_ctx_t *ctx,
         /* doc-comment references: a failure is recorded for publication
          * (doc_links.status), never a failed index */
         {cbm_pipeline_pass_doc_links, "doc_links", true},
+        /* ontology runs last: it binds to code QNs from every prior pass */
+        {cbm_pipeline_pass_ontology, "ontology", true},
     };
     int rc = 0;
     for (int si = 0; si < PL_SEQ_PASSES && rc == 0; si++) {
@@ -2600,6 +2602,11 @@ static int run_parallel_pipeline(cbm_pipeline_t *p, cbm_pipeline_ctx_t *ctx,
     cbm_pipeline_pass_k8s(ctx, files, file_count);
     cbm_log_info("pass.timing", "pass", "k8s", "elapsed_ms", itoa_buf((int)elapsed_ms(*t)));
     pipeline_phase_mark("k8s");
+    /* ontology materializes .cbm-ontology.json against the full graph */
+    cbm_clock_gettime(CLOCK_MONOTONIC, t);
+    cbm_pipeline_pass_ontology(ctx, files, file_count);
+    cbm_log_info("pass.timing", "pass", "ontology", "elapsed_ms", itoa_buf((int)elapsed_ms(*t)));
+    pipeline_phase_mark("ontology");
     return check_cancel(p) ? CBM_NOT_FOUND : 0;
 }
 

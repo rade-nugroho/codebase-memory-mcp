@@ -218,6 +218,7 @@ The install script placed beside the binary is **reported, not deleted** — uni
 ### Graph & analysis
 - **Architecture overview**: `get_architecture` returns languages, packages, entry points, routes, hotspots, boundaries, layers, and clusters in a single call
 - **Architecture Decision Records**: `manage_adr` persists architectural decisions across sessions
+- **Project ontology**: `.cbm-ontology.json` declares Palantir-style object types, links, interfaces, and executable action types bound to code symbols via weak qualified-name bindings; `ontology_query`, `manage_ontology`, and `ontology_execute` expose them to agents, and the Atlas UI has a dedicated Ontology workspace
 - **Louvain community detection**: Discovers functional modules by clustering call edges
 - **Git diff impact mapping**: `detect_changes` maps uncommitted changes to affected symbols with risk classification
 - **Call graph**: Resolves function calls across files and packages (import-aware, type-inferred)
@@ -751,7 +752,64 @@ mode. `index_status` keeps describing the published graph and its freshness.
 | `get_architecture` | Codebase overview: languages, packages, routes, hotspots, clusters, ADR. |
 | `search_code` | Grep-like text search within indexed project files. |
 | `manage_adr` | CRUD for Architecture Decision Records (`get` reads, `update` replaces the whole document, `set_sections` rewrites only the named sections and leaves every other byte untouched, `sections` lists headings). Query modes do not wait behind a same-project reindex; writes remain serialized. |
+| `ontology_query` | Read the project's Palantir-style ontology materialized from `.cbm-ontology.json`: kind `summary` counts each element kind; a kind plus `name` returns the full object view (properties, resolved bindings with file/line, links, actions, instances, stale bindings). `kind=audit` lists `ontology_execute` runs. |
+| `manage_ontology` | Manage `.cbm-ontology.json`: `get` reads it, `validate` checks supplied content or the file on disk, `update` validates then atomically replaces the file AND applies it to the live graph, `apply` re-materializes the file on disk, `delete` removes the file and every ontology node. Writes take the project mutation lease; a rejected validation writes nothing. |
+| `ontology_execute` | Run an executable action type declared in `.cbm-ontology.json`: argv templates get `{{param}}` substitution (never shell-parsed), declared params are type/enum/pattern checked, `confirm:true` actions require `confirm:true`, execution is supervised under a timeout, and every run records an audit row. |
 | `ingest_traces` | Ingest runtime traces to validate HTTP_CALLS edges. |
+
+### Project ontology (`.cbm-ontology.json`)
+
+A repository may declare a Palantir-Foundry-style ontology in `.cbm-ontology.json` at its root. Indexing materializes it into the graph as `Ontology*` nodes — object types, object instances, interfaces, link types, action types, functions, and shared properties — linked to the code they name by *weak qualified-name bindings*: a binding survives reindexing as long as the target symbol's qualified name is stable, and a target that no longer resolves is reported as `stale` in the object view instead of being silently dropped.
+
+```json
+{
+  "version": 1,
+  "shared_properties": {
+    "tenant_id": { "type": "string", "description": "Owning tenant" }
+  },
+  "interfaces": {
+    "Audited": { "description": "Entities with an audit trail",
+                 "properties": { "created_at": { "type": "string", "required": true } } }
+  },
+  "object_types": {
+    "Order": {
+      "description": "A customer order as modeled in code",
+      "binds": ["myproj.src.service.Order"],
+      "implements": ["Audited"],
+      "properties": {
+        "order_id": { "type": "string", "required": true },
+        "status":   { "type": "enum", "values": ["pending", "fulfilled", "cancelled"] }
+      },
+      "links": [{ "type": "placed_by", "target": "Customer", "cardinality": "many" }],
+      "actions": ["cancel_order"],
+      "functions": ["order_total"]
+    }
+  },
+  "objects": {
+    "demo-order-1": { "type": "Order", "bind": "myproj.src.service.Order",
+                      "properties": { "order_id": "ORD-42" } }
+  },
+  "link_types": {
+    "placed_by": { "source": "Order", "target": "Customer", "cardinality": "many" }
+  },
+  "action_types": {
+    "cancel_order": {
+      "description": "Cancel an order",
+      "confirm": true,
+      "targets": ["Order"],
+      "params": {
+        "order_id": { "type": "string", "required": true, "pattern": "^ORD-" }
+      },
+      "exec": { "argv": ["./scripts/cancel-order.sh", "{{order_id}}"], "cwd": ".", "timeout_ms": 5000 }
+    }
+  },
+  "functions": {
+    "order_total": { "signature": "(Order) -> number", "bind": "myproj.src.service.orderTotal" }
+  }
+}
+```
+
+Element sections are name-keyed objects. An action type may declare `exec` (argv template) or `builtin` (currently `reindex`), never both. `manage_ontology(mode='update')` is the live-write path: it validates the document, atomically replaces the file, and re-materializes the ontology nodes under the project mutation lease — rejected validation writes nothing. Over the Atlas UI `/rpc` surface, only `ontology_query`, `ontology_execute`, and the read modes of `manage_ontology` (`get`, `validate`) are exposed.
 
 `manage_adr(mode='set_sections')` writes one or more sections by name and splices them into the stored document, so text outside the named sections — including a preamble, code fences and section ordering — is preserved byte-for-byte. Any `## Heading` works, not just the conventional PURPOSE / STACK / ARCHITECTURE / PATTERNS / TRADEOFFS / PHILOSOPHY set; names match exactly, including case. Writing the same section twice is a no-op, so a retry after a lost response cannot duplicate content.
 
@@ -761,13 +819,15 @@ mode. `index_status` keeps describing the published graph and its freshness.
 
 ### Node Labels
 
-`Project`, `Package`, `Folder`, `File`, `Module`, `Section`, `Class`, `Struct`, `Interface`, `Trait`, `Enum`, `Type`, `Function`, `Method`, `Field`, `Variable`, `Constant`, `Macro`, `Decorator`, `Route`, `Channel`, `Table`, `Process`, `EnvVar`, `Resource`, `Chart`, `Image`, `Branch`
+`Project`, `Package`, `Folder`, `File`, `Module`, `Section`, `Class`, `Struct`, `Interface`, `Trait`, `Enum`, `Type`, `Function`, `Method`, `Field`, `Variable`, `Constant`, `Macro`, `Decorator`, `Route`, `Channel`, `Table`, `Process`, `EnvVar`, `Resource`, `Chart`, `Image`, `Branch`, and the ontology labels `Ontology`, `OntologyObjectType`, `OntologyObject`, `OntologyInterface`, `OntologyLinkType`, `OntologyActionType`, `OntologyFunction`, `OntologySharedProperty` (emitted from `.cbm-ontology.json`)
 
 ### Edge Types
 
 `CONTAINS_FOLDER`, `CONTAINS_FILE`, `DEFINES`, `DEFINES_METHOD`, `IMPORTS`, `CALLS`, `CALL_REFERENCE`, `USAGE`, `INHERITS`, `IMPLEMENTS`, `OVERRIDE`, `DECORATES`, `RAISES`, `THROWS`, `WRITES`, `DATA_FLOWS`, `HTTP_CALLS`, `GRPC_CALLS`, `ASYNC_CALLS`, `EMITS`, `LISTENS_ON`, `HANDLES`, `SPAWNS`, `CONFIGURES`, `INFRA_MAPS`, `DEPENDS_ON`, `REFERENCES_FILE`, `MENTIONS`, `TESTS`, `TESTS_FILE`, `SIMILAR_TO`, `SEMANTICALLY_RELATED`, `FILE_CHANGES_WITH`, `HAS_BRANCH`, and the cross-repo `CROSS_HTTP_CALLS`, `CROSS_GRPC_CALLS`, `CROSS_GRAPHQL_CALLS`, `CROSS_TRPC_CALLS`, `CROSS_ASYNC_CALLS`, `CROSS_CHANNEL`
 
 `MENTIONS` links a documented definition to the code its doc comment references (C# `<see cref>`, `<seealso cref>`, `<exception cref>`, `<inheritdoc cref>`), one edge per pair with `via`, `syntax`, `tier` (`exact` or `unique`), first `line` and `count`. A reference is bound only when it names exactly one definition under the language's own lookup rules; the rest are counted by reason in `index_status` under `doc_links` (samples with `diagnostics='full'`).
+
+Ontology edges: `ONT_BINDS` (element → code node, weak qualified-name binding), `ONT_IMPLEMENTS` (object type → interface), `ONT_LINKS` (object type → object type, carrying `type`/`cardinality`), `ONT_HAS_ACTION`, `ONT_HAS_FUNCTION`, `ONT_HAS_PROPERTY` (object type → shared property), `ONT_INSTANCE_OF` (object → object type).
 
 ### Qualified Names
 

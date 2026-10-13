@@ -3152,6 +3152,7 @@ static int run_closure_delta(cbm_pipeline_t *p, const char *db_path, const char 
         phase_rc = cbm_pipeline_pass_k8s(&ctx, changed_files, ci);
     }
     if (phase_rc == 0) {
+        (void)cbm_pipeline_pass_ontology(&ctx, changed_files, ci);
         phase_rc = cbm_pipeline_check_cancel(&ctx);
     }
     if (phase_rc == 0) {
@@ -3835,6 +3836,7 @@ int cbm_pipeline_run_incremental(cbm_pipeline_t *p, const char *db_path, cbm_fil
         phase_rc = cbm_pipeline_pass_k8s(&ctx, changed_files, ci);
     }
     if (phase_rc == 0) {
+        (void)cbm_pipeline_pass_ontology(&ctx, changed_files, ci);
         phase_rc = cbm_pipeline_check_cancel(&ctx);
     }
     if (phase_rc == 0) {

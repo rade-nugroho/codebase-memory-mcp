@@ -1025,6 +1025,13 @@ int cbm_pipeline_pass_definitions(cbm_pipeline_ctx_t *ctx, const cbm_file_info_t
 
 int cbm_pipeline_pass_k8s(cbm_pipeline_ctx_t *ctx, const cbm_file_info_t *files, int file_count);
 
+/* Materialize <repo>/.cbm-ontology.json into the graph (object types,
+ * objects, interfaces, link/action types, functions + ONT_* edges). Runs
+ * after the resolve passes so code-node bindings resolve. Missing file is a
+ * no-op; a broken file/binding records a skip, never fails the index. */
+int cbm_pipeline_pass_ontology(cbm_pipeline_ctx_t *ctx, const cbm_file_info_t *files,
+                               int file_count);
+
 int cbm_pipeline_pass_calls(cbm_pipeline_ctx_t *ctx, const cbm_file_info_t *files, int file_count);
 
 /* Cross-file LSP type-aware call resolution pass. Augments per-file

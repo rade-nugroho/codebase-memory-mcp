@@ -1,6 +1,6 @@
 import { experimentalAgentsEnabled } from './feature-flags';
 
-export type Workspace = 'explore' | 'galaxy' | 'architecture' | 'adr' | 'agents' | 'coverage' | 'system';
+export type Workspace = 'explore' | 'galaxy' | 'architecture' | 'adr' | 'agents' | 'coverage' | 'ontology' | 'system';
 export type Guidance = 'brief' | 'explained';
 
 export const workspaceStrings = {
@@ -12,6 +12,7 @@ export const workspaceStrings = {
         { id: 'adr' as const, label: 'ADR' },
         { id: 'agents' as const, label: 'Agents' },
         { id: 'coverage' as const, label: 'Coverage' },
+        { id: 'ontology' as const, label: 'Ontology' },
         { id: 'system' as const, label: 'System' },
     ],
     tools: 'Tools',
@@ -43,6 +44,7 @@ export const workspaceStrings = {
         adr: 'Read and edit the project’s architecture decisions.',
         agents: 'Inspect recorded activity and touched code.',
         coverage: 'Inspect indexed paths, exclusions, and parser gaps.',
+        ontology: 'Browse object types, links, actions, and their code bindings.',
         system: 'Monitor the daemon, indexes, and logs.',
     },
     changeLater: 'Switch workspaces at any time.',

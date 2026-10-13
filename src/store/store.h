@@ -1321,4 +1321,33 @@ int cbm_store_exec(cbm_store_t *s, const char *sql);
  * fatal); CBM_STORE_ERR on a genuine write failure. */
 int cbm_store_fts_rebuild(cbm_store_t *s, const char *project, int64_t after_id);
 
+/* ── Ontology action audit ────────────────────────────────────── */
+
+/* One row per ontology_execute attempt (success or failure). Strings are
+ * heap-owned; free the array with cbm_store_ontology_audit_free. */
+typedef struct {
+    int64_t id;
+    const char *action;
+    const char *actor;
+    const char *params_json;
+    const char *status; /* "ok" | "error" | "denied" | "timeout" | "cancelled" */
+    int exit_code;
+    int duration_ms;
+    const char *detail; /* stderr tail / error message */
+    const char *created_at;
+} cbm_ontology_audit_row_t;
+
+/* Record an execution attempt. Lazily creates ontology_audit (like
+ * doc_link_unresolved) so no schema migration is needed. */
+int cbm_store_ontology_audit_write(cbm_store_t *s, const char *project, const char *action,
+                                   const char *actor, const char *params_json,
+                                   const char *status, int exit_code, int duration_ms,
+                                   const char *detail);
+
+/* Newest-first list, capped at 500 rows. */
+int cbm_store_ontology_audit_list(cbm_store_t *s, const char *project, int limit,
+                                  cbm_ontology_audit_row_t **out, int *count);
+
+void cbm_store_ontology_audit_free(cbm_ontology_audit_row_t *rows, int count);
+
 #endif /* CBM_STORE_H */

@@ -138,6 +138,8 @@ import { readerChatContext, type ReaderSourceOrigin } from './browser-ai/reader-
 import type { BrowserChatContext } from './browser-ai/chat-model';
 import { selectionEvidenceContext } from './galaxy/selection-evidence';
 import SystemWorkspace from './system/SystemWorkspace';
+import OntologyWorkspace from './ontology/OntologyWorkspace';
+import { rpcOntologySource } from './ontology/ontology-model';
 import type { Workspace, Guidance } from './app/workspace-strings';
 import { allowedWorkspace, initialWorkspace, workspaceStrings as workspaceText } from './app/workspace-strings';
 import { experimentalAgentsEnabled } from './app/feature-flags';
@@ -842,6 +844,8 @@ function ProjectWindowView({ projectWindow }: { projectWindow: ProjectWindow<Win
         }),
         [client, api],
     );
+    /* The ontology workspace reads the same /rpc surface the client uses. */
+    const ontologySource = useMemo(() => rpcOntologySource({ signal: projectWindow.signal }), [projectWindow.signal]);
     // Opening a project stays in this page and keeps a loaded agent (K24).
     const openProject = projectWindow.open;
 
@@ -4874,6 +4878,9 @@ function ProjectWindowView({ projectWindow }: { projectWindow: ProjectWindow<Win
                 </div>}
                 <div className="atlas-adr-host" hidden={workspace !== 'adr'}>
                     <AdrWorkspace key={project} project={project} source={projectsSource} active={workspace === 'adr'} />
+                </div>
+                <div hidden={workspace !== 'ontology'}>
+                    <OntologyWorkspace key={project} project={project} source={ontologySource} active={workspace === 'ontology'} />
                 </div>
                 <div hidden={workspace !== 'system'}>
                     <SystemWorkspace api={api} listProjects={projectsSource.listProjects} project={project} active={workspace === 'system'} version={ATLAS_VERSION}

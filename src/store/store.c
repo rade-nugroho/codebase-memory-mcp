@@ -11857,3 +11857,132 @@ int cbm_store_observed_lookup(cbm_store_t *s, const char *project, const char *c
         *count_out = total;
     return CBM_STORE_OK;
 }
+
+/* ── Ontology action audit ────────────────────────────────────── */
+
+/* Lazily created like doc_link_unresolved: an old DB gains the table the
+ * first time an action is audited, never via a schema migration. */
+static const char ONT_AUDIT_DDL[] =
+    "CREATE TABLE IF NOT EXISTS ontology_audit ("
+    "  id INTEGER PRIMARY KEY AUTOINCREMENT,"
+    "  project TEXT NOT NULL,"
+    "  action TEXT NOT NULL,"
+    "  actor TEXT,"
+    "  params_json TEXT,"
+    "  status TEXT NOT NULL,"
+    "  exit_code INTEGER,"
+    "  duration_ms INTEGER,"
+    "  detail TEXT,"
+    "  created_at TEXT NOT NULL"
+    ");"
+    "CREATE INDEX IF NOT EXISTS idx_ontology_audit_project"
+    " ON ontology_audit(project, id DESC);";
+
+int cbm_store_ontology_audit_write(cbm_store_t *s, const char *project, const char *action,
+                                   const char *actor, const char *params_json,
+                                   const char *status, int exit_code, int duration_ms,
+                                   const char *detail) {
+    if (!s || !s->db || !project || !action || !status) {
+        return CBM_STORE_ERR;
+    }
+    if (exec_sql(s, ONT_AUDIT_DDL) != CBM_STORE_OK) {
+        return CBM_STORE_ERR;
+    }
+    sqlite3_stmt *stmt = NULL;
+    if (sqlite3_prepare_v2(s->db,
+                           "INSERT INTO ontology_audit"
+                           " (project, action, actor, params_json, status, exit_code,"
+                           "  duration_ms, detail, created_at)"
+                           " VALUES (?1,?2,?3,?4,?5,?6,?7,?8, datetime('now'))",
+                           CBM_NOT_FOUND, &stmt, NULL) != SQLITE_OK) {
+        store_set_error_sqlite(s, "ontology_audit_write");
+        return CBM_STORE_ERR;
+    }
+    bind_text(stmt, SKIP_ONE, project);
+    bind_text(stmt, ST_COL_2, action);
+    bind_text(stmt, ST_COL_3, actor);
+    bind_text(stmt, ST_COL_4, params_json);
+    bind_text(stmt, ST_COL_5, status);
+    sqlite3_bind_int(stmt, ST_COL_6, exit_code);
+    sqlite3_bind_int(stmt, ST_COL_7, duration_ms);
+    bind_text(stmt, ST_COL_8, detail);
+    int ok = (sqlite3_step(stmt) == SQLITE_DONE) ? CBM_STORE_OK : CBM_STORE_ERR;
+    sqlite3_finalize(stmt);
+    if (ok != CBM_STORE_OK) {
+        store_set_error_sqlite(s, "ontology_audit_write");
+    }
+    return ok;
+}
+
+int cbm_store_ontology_audit_list(cbm_store_t *s, const char *project, int limit,
+                                  cbm_ontology_audit_row_t **out, int *count) {
+    *out = NULL;
+    *count = 0;
+    if (!s || !s->db || !project) {
+        return CBM_STORE_ERR;
+    }
+    if (exec_sql(s, ONT_AUDIT_DDL) != CBM_STORE_OK) {
+        return CBM_STORE_ERR;
+    }
+    if (limit <= 0 || limit > 500) {
+        limit = 50;
+    }
+    sqlite3_stmt *stmt = NULL;
+    if (sqlite3_prepare_v2(s->db,
+                           "SELECT id, action, actor, params_json, status, exit_code,"
+                           " duration_ms, detail, created_at"
+                           " FROM ontology_audit WHERE project=?1 ORDER BY id DESC LIMIT ?2",
+                           CBM_NOT_FOUND, &stmt, NULL) != SQLITE_OK) {
+        return CBM_STORE_ERR;
+    }
+    bind_text(stmt, SKIP_ONE, project);
+    sqlite3_bind_int(stmt, ST_COL_2, limit);
+    int cap = 16;
+    cbm_ontology_audit_row_t *rows = malloc((size_t)cap * sizeof(*rows));
+    if (!rows) {
+        sqlite3_finalize(stmt);
+        return CBM_STORE_ERR;
+    }
+    int n = 0;
+    while (sqlite3_step(stmt) == SQLITE_ROW) {
+        if (n == cap) {
+            cap *= 2;
+            cbm_ontology_audit_row_t *bigger = realloc(rows, (size_t)cap * sizeof(*rows));
+            if (!bigger) {
+                break;
+            }
+            rows = bigger;
+        }
+        cbm_ontology_audit_row_t *r = &rows[n];
+        memset(r, 0, sizeof(*r));
+        r->id = sqlite3_column_int64(stmt, 0);
+        r->action = heap_strdup((const char *)sqlite3_column_text(stmt, 1));
+        r->actor = heap_strdup((const char *)sqlite3_column_text(stmt, 2));
+        r->params_json = heap_strdup((const char *)sqlite3_column_text(stmt, 3));
+        r->status = heap_strdup((const char *)sqlite3_column_text(stmt, 4));
+        r->exit_code = sqlite3_column_int(stmt, 5);
+        r->duration_ms = sqlite3_column_int(stmt, 6);
+        r->detail = heap_strdup((const char *)sqlite3_column_text(stmt, 7));
+        r->created_at = heap_strdup((const char *)sqlite3_column_text(stmt, 8));
+        n++;
+    }
+    sqlite3_finalize(stmt);
+    *out = rows;
+    *count = n;
+    return CBM_STORE_OK;
+}
+
+void cbm_store_ontology_audit_free(cbm_ontology_audit_row_t *rows, int count) {
+    if (!rows) {
+        return;
+    }
+    for (int i = 0; i < count; i++) {
+        free((void *)rows[i].action);
+        free((void *)rows[i].actor);
+        free((void *)rows[i].params_json);
+        free((void *)rows[i].status);
+        free((void *)rows[i].detail);
+        free((void *)rows[i].created_at);
+    }
+    free(rows);
+}

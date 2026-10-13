@@ -2984,6 +2984,7 @@ static const char *const UI_RPC_READ_TOOLS[] = {
     "list_projects", "get_code_snippet", "get_graph_schema",     "search_graph",
     "search_code",   "trace_path",       "trace_call_path",      "get_architecture",
     "query_graph",   "detect_changes",   "check_index_coverage", "index_status",
+    "ontology_query", "ontology_execute",
 };
 
 static bool rpc_tool_is_read_only(const char *name) {
@@ -3020,6 +3021,32 @@ static bool rpc_manage_adr_is_read(yyjson_val *params) {
     return true;
 }
 
+/* manage_ontology is read-only only in its "get" and "validate" modes (and
+ * the absent-mode "get" default); update/apply/delete mutate the definition
+ * file and the live graph and are refused here. Same ambiguity rule as
+ * manage_adr: a duplicated or non-string "mode" is refused. */
+static bool rpc_manage_ontology_is_read(yyjson_val *params) {
+    yyjson_val *arguments = json_unique_member(params, "arguments");
+    if (!arguments)
+        return yyjson_obj_get(params, "arguments") == NULL;
+    if (!yyjson_is_obj(arguments))
+        return false;
+    bool mode_seen = false;
+    size_t index, maximum;
+    yyjson_val *key, *value;
+    yyjson_obj_foreach(arguments, index, maximum, key, value) {
+        if (strcmp(yyjson_get_str(key), "mode") != 0)
+            continue;
+        if (mode_seen || !yyjson_is_str(value))
+            return false;
+        mode_seen = true;
+        const char *mode_text = yyjson_get_str(value);
+        if (strcmp(mode_text, "get") != 0 && strcmp(mode_text, "validate") != 0)
+            return false;
+    }
+    return true;
+}
+
 static bool rpc_is_allowed_for_ui(const char *body, size_t body_len) {
     yyjson_doc *document = yyjson_read(body, body_len, 0);
     if (!document)
@@ -3036,6 +3063,8 @@ static bool rpc_is_allowed_for_ui(const char *body, size_t body_len) {
             allowed = true;
         else if (strcmp(name_text, "manage_adr") == 0)
             allowed = rpc_manage_adr_is_read(params);
+        else if (strcmp(name_text, "manage_ontology") == 0)
+            allowed = rpc_manage_ontology_is_read(params);
     }
     yyjson_doc_free(document);
     return allowed;
