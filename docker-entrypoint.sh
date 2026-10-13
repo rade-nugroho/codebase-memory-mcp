@@ -22,11 +22,13 @@ if [ -n "$CBM_DOCS_REPO" ]; then
     codebase-memory-mcp cli index_repository "{\"repo_path\":\"$KNOWLEDGE_DIR\"}" || true
 fi
 
-# Atlas UI: cbm serves loopback on 9750; nginx fronts it on 9749 with basic
-# auth (password = CBM_UI_PASSWORD, falling back to SUPERGATEWAY_API_KEY).
+# Atlas UI: `daemon start` brings up a permanent daemon that serves the UI on
+# loopback 9750 (a plain `--ui` MCP session retires when idle). nginx fronts
+# it on 9749 with basic auth (password = CBM_UI_PASSWORD, falling back to
+# SUPERGATEWAY_API_KEY).
 UI_PASS="${CBM_UI_PASSWORD:-${SUPERGATEWAY_API_KEY:-cbm}}"
 printf 'cbm:%s\n' "$(openssl passwd -apr1 "$UI_PASS")" > /etc/nginx/cbm-ui.htpasswd
-sleep infinity | codebase-memory-mcp --ui=true --port=9750 &
+codebase-memory-mcp daemon start --port=9750 || true
 nginx
 
 exec supergateway --stdio codebase-memory-mcp --port 8000 \
